@@ -1,332 +1,283 @@
 #include <M5Cardputer.h>
 #include <SD.h>
-#include <JPEGDecoder.h>
 #include <WiFi.h>
-#include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
-#include <EasyNTPClient.h>
-#include <WiFiUdp.h>
+#include <vector>
 
-WiFiClientSecure client;
-WiFiUDP udp;
+// --- Configuration ---
+const int JSON_DOC_CAPACITY = 8192; // Increased capacity for dialogs list
+const int MAX_DIALOGS = 20;       // Fetch up to 20 dialogs
 
-EasyNTPClient ntpClient(udp, "pool.ntp.org", 0);
-
+// --- Global Variables ---
 String ssid;
 String password;
-String ip;
-String number;
-String sessionCookie;
+String serverIp;
+String userToken;
 
-String getInputAt(int x, int y) {
-  String data = "> ";  // prompt
-  M5Cardputer.Display.setCursor(x, y);
-  M5Cardputer.Display.print(data);
+// --- Data Structures ---
+struct Dialog {
+    long id;
+    String title;
+    String last_message;
+    int unread_count;
+};
 
-  while (true) {
-    M5Cardputer.update();
+std::vector<Dialog> dialogs;
 
-    if (M5Cardputer.Keyboard.isChange() && M5Cardputer.Keyboard.isPressed()) {
-      auto status = M5Cardputer.Keyboard.keysState();
+// --- Application State ---
+enum AppState {
+    STATE_LOADING,
+    STATE_CHAT_LIST,
+    STATE_CHAT_VIEW,
+    STATE_ERROR
+};
+AppState currentState = STATE_LOADING;
 
-      for (auto c : status.word) data += c;
+int selectedDialogIndex = 0;
+int topVisibleIndex = 0; // For scrolling
 
-      if (status.del && data.length() > 2) data.remove(data.length() - 1);
-
-      M5Cardputer.Display.fillRect(x, y, 200, 16, TFT_BLACK);
-      M5Cardputer.Display.setCursor(x, y);
-      M5Cardputer.Display.print(data);
-
-      if (status.enter) {
-        String input = data;
-        input.remove(0, 2);
-        input.trim();
-        return input;
-      }
-    }  
-  
-    delay(10);
-  }
-}
-
-bool isRPressed() {
-  M5Cardputer.update();
-  auto status = M5Cardputer.Keyboard.keysState();
-
-  for (char c : status.word) {
-    if (c == 'r' || c == 'R') return true;
-  }
-
-  return false;
-}
-
-void saveData() {
-  File file = SD.open("/sushigram.json", FILE_WRITE);
-  if (!file) {
-    M5Cardputer.Display.println("Failed to open file for writing!");
-    return;
-  }
-
-  StaticJsonDocument<512> doc;
-  doc["ssid"] = ssid;
-  doc["password"] = password;
-  doc["ip"] = ip;
-  doc["number"] = number;
-  doc["session"] = sessionCookie;
-
-  serializeJson(doc, file);
-  file.close();
-}
-
+// --- Functions for Loading Config ---
 bool loadData() {
-  if (!SD.exists("/sushigram.json")) return false;
+    if (!SD.exists("/sushigram.json")) {
+        M5Cardputer.Display.println("sushigram.json not found!");
+        M5Cardputer.Display.println("Please run the Python script");
+        M5Cardputer.Display.println("and place the file on the SD card.");
+        return false;
+    }
+    File file = SD.open("/sushigram.json");
+    if (!file) return false;
 
-  File file = SD.open("/sushigram.json");
-  if (!file) {
-    M5Cardputer.Display.println("Failed to open file for reading!");
-    return false;
-  }
+    StaticJsonDocument<512> doc;
+    DeserializationError error = deserializeJson(doc, file);
+    file.close();
 
-  StaticJsonDocument<512> doc;
-  DeserializationError error = deserializeJson(doc, file);
-  file.close();
+    if (error) {
+        M5Cardputer.Display.println("Failed to parse config!");
+        return false;
+    }
+    ssid = doc["ssid"].as<String>();
+    password = doc["password"].as<String>();
+    serverIp = doc["server_ip"].as<String>();
+    userToken = doc["user_token"].as<String>();
 
-  if (error) {
-    M5Cardputer.Display.println("Failed to parse JSON!");
-    return false;
-  }
-
-  ssid = doc["ssid"].as<String>();
-  password = doc["password"].as<String>();
-  ip = doc["ip"].as<String>();
-  number = doc["number"].as<String>();
-  sessionCookie = doc["session"].as<String>();
-
-  return true;
+    if (userToken.length() == 0) {
+        M5Cardputer.Display.println("No user_token in config!");
+        M5Cardputer.Display.println("Please log in using the");
+        M5Cardputer.Display.println("Python script first.");
+        return false;
+    }
+    return true;
 }
 
+// --- WiFi Connection ---
 void connectWiFi() {
-  M5Cardputer.Display.setCursor(10, 40);
-  M5Cardputer.Display.print("Connecting to WiFi...");
-  
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    M5Cardputer.Display.print(".");
-  }
-}
-
-void firstLaunch() {
-  M5Cardputer.Display.fillScreen(TFT_BLACK);
-  M5Cardputer.Display.setCursor(10, 10);
-  M5Cardputer.Display.println("Enter SSID:");
-  ssid = getInputAt(10, 20);
-  M5Cardputer.Display.fillScreen(TFT_BLACK);
-  M5Cardputer.Display.setCursor(10, 10);
-  M5Cardputer.Display.println("Enter password:");
-  password = getInputAt(10, 20);
-
-  M5Cardputer.Display.fillScreen(TFT_BLACK);
-  connectWiFi();
-  M5Cardputer.Display.fillScreen(TFT_BLACK);
-
-  M5Cardputer.Display.fillScreen(TFT_BLACK);
-  M5Cardputer.Display.setCursor(10, 10);
-  M5Cardputer.Display.println("Input the proxy IP:");
-  ip = getInputAt(10, 20);
-  M5Cardputer.Display.fillScreen(TFT_BLACK);
-  M5Cardputer.Display.setCursor(10, 10);
-  M5Cardputer.Display.println("Input your phone number:");
-  number = getInputAt(10, 20);
-
-  retrieveSession();
-
-  unsigned long unixTime = ntpClient.getUnixTime();
-
-  fetchCaptcha(unixTime);
-
-  //DO NOT CLEAR SCREEN HERE
-  String captchaCode = getInputAt(10, 55);
-  login(captchaCode);
-}
-
-void drawJPEG(int x, int y) {
-  int mcu_w = JpegDec.MCUWidth;
-  int mcu_h = JpegDec.MCUHeight;
-  int mcu_x = 0;
-  int mcu_y = 0;
-
-  while (JpegDec.read()) {
-    uint16_t* pImage = JpegDec.pImage;
-    int mcu_pixels = mcu_w * mcu_h;
-    for (int i = 0; i < mcu_pixels; i++) {
-      pImage[i] = (pImage[i] << 8) | (pImage[i] >> 8); // swap RGB bytes if needed
+    M5Cardputer.Display.print("Connecting to WiFi...");
+    WiFi.begin(ssid.c_str(), password.c_str());
+    int attempts = 0;
+    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+        delay(500);
+        M5Cardputer.Display.print(".");
+        attempts++;
     }
-
-    int block_w = (mcu_x + mcu_w <= JpegDec.width) ? mcu_w : (JpegDec.width - mcu_x);
-    int block_h = (mcu_y + mcu_h <= JpegDec.height) ? mcu_h : (JpegDec.height - mcu_y);
-
-    M5Cardputer.Display.pushImage(x + mcu_x, y + mcu_y, block_w, block_h, pImage);
-
-    mcu_x += mcu_w;
-    if (mcu_x >= JpegDec.width) {
-      mcu_x = 0;
-      mcu_y += mcu_h;
+    if (WiFi.status() != WL_CONNECTED) {
+        M5Cardputer.Display.println("\nFailed to connect.");
+        currentState = STATE_ERROR;
+    } else {
+        M5Cardputer.Display.println("\nConnected!");
     }
-  }
 }
 
-void fetchCaptcha(unsigned long unixTime) {
-  client.setInsecure(); // ignore TLS for HTTPS
+// --- API Communication ---
+String makeApiRequest(String method, String queryParams) {
+    HTTPClient http;
+    String url = "https://" + serverIp + "/api.php?method=" + method + "&v=10&user=" + userToken + "&" + queryParams;
 
-  if (!client.connect(ip.c_str(), 443)) {
-    Serial.println("Connection failed!");
-    return;
-  }
+    http.begin(url);
+    int httpCode = http.POST("");
+    String payload = "{}";
 
-  String url = "/captcha.php?r=" + String(unixTime);
-  String req = "GET " + url + " HTTP/1.1\r\n";
-  req += "Host: " + ip + "\r\n";
-  req += "User-Agent: Mozilla/5.0 (ESP32) M5Cardputer\r\n";
-  req += "Cookie: " + sessionCookie + "\r\n";
-  req += "Connection: close\r\n\r\n";
-
-  client.print(req);
-
-  // Skip HTTP headers
-  while (client.connected()) {
-    String line = client.readStringUntil('\n');
-    if (line == "\r") break;
-  }
-
-  // Read image into buffer
-  static uint8_t jpgBuf[32 * 1024]; // adjust size if needed
-  size_t jpgSize = 0;
-
-  while (client.available() && jpgSize < sizeof(jpgBuf)) {
-    jpgBuf[jpgSize++] = client.read();
-  }
-  client.stop();
-
-  if (jpgSize == 0) {
-    Serial.println("Failed to read captcha image");
-    return;
-  }
-
-  // Decode and display
-  if (JpegDec.decodeArray(jpgBuf, jpgSize) == 1) {
-    drawJPEG(0, 0);
-    Serial.println("Captcha displayed");
-  } else {
-    Serial.println("JPEG decode failed");
-  }
+    if (httpCode > 0 && httpCode == HTTP_CODE_OK) {
+        payload = http.getString();
+    } else {
+        payload = "{\"error\":\"HTTP " + String(httpCode) + "\"}";
+    }
+    http.end();
+    return payload;
 }
 
-void retrieveSession() {
-  client.setInsecure(); // for HTTPS
-
-  if (!client.connect(ip.c_str(), 443)) {
-    M5Cardputer.Display.println("Failed to connect to proxy!");
-    return;
-  }
-
-  // Send GET /login.php to get PHPSESSID
-  String req = "GET /login.php HTTP/1.1\r\n";
-  req += "Host: " + ip + "\r\n";
-  req += "User-Agent: Mozilla/5.0 (ESP32) M5Cardputer\r\n";
-  req += "Accept: text/html\r\n";
-  req += "Connection: close\r\n\r\n";
-  client.print(req);
-
-  // Read response headers and extract Set-Cookie
-  sessionCookie = "";
-  while (client.connected() || client.available()) {
-    String line = client.readStringUntil('\n');
-    line.trim();
-    if (line.length() == 0) break; // headers done
-
-    if (line.startsWith("Set-Cookie:")) {
-      int idx = line.indexOf(':');
-      String cookieLine = line.substring(idx + 1);
-      cookieLine.trim();
-      int sc = cookieLine.indexOf(';');
-      if (sc > 0) cookieLine = cookieLine.substring(0, sc);
-      if (cookieLine.startsWith("PHPSESSID")) {
-        sessionCookie = cookieLine; // store PHPSESSID
-        break;
-      }
-    }
-  }
-  client.stop();
-
-  if (sessionCookie.length()) {
+void fetchDialogs() {
     M5Cardputer.Display.fillScreen(TFT_BLACK);
     M5Cardputer.Display.setCursor(10, 10);
-    M5Cardputer.Display.println("Session retrieved:");
-    M5Cardputer.Display.println(sessionCookie);
-    saveData();
-  } else {
-    M5Cardputer.Display.println("Failed to get session!");
-  }
+    M5Cardputer.Display.println("Fetching chats...");
+
+    String response = makeApiRequest("getDialogs", "limit=" + String(MAX_DIALOGS));
+
+    DynamicJsonDocument doc(JSON_DOC_CAPACITY);
+    DeserializationError error = deserializeJson(doc, response);
+
+    if (error || !doc["response"].is<JsonArray>()) {
+        M5Cardputer.Display.println("Failed to parse dialogs!");
+        M5Cardputer.Display.println(response);
+        currentState = STATE_ERROR;
+        return;
+    }
+
+    dialogs.clear();
+    for (JsonObject item : doc["response"].as<JsonArray>()) {
+        Dialog d;
+        d.id = item["peer"]["id"];
+        d.title = item["peer"]["title"].as<String>();
+        d.last_message = item["message"].as<String>();
+        d.unread_count = item["unread_count"];
+        dialogs.push_back(d);
+    }
+    currentState = STATE_CHAT_LIST;
+    drawChatList();
 }
 
-void login(String captchaCode) {
-  client.setInsecure();
+// --- UI Drawing Functions ---
+void drawChatList() {
+    M5Cardputer.Display.fillScreen(TFT_BLACK);
+    M5Cardputer.Display.setTextSize(1);
+    M5Cardputer.Display.setCursor(0, 0);
 
-  if (!client.connect(ip.c_str(), 443)) {
-    M5Cardputer.Display.println("Failed to connect to proxy!");
-    return;
-  }
+    int y = 5;
+    int maxLines = M5Cardputer.Display.height() / 20;
 
-  String postData = "phone=" + number + "&c=" + captchaCode;
-  String req = "POST /login.php HTTP/1.1\r\n";
-  req += "Host: " + ip + "\r\n";
-  req += "User-Agent: Mozilla/5.0 (ESP32) M5Cardputer\r\n";
-  req += "Cookie: " + sessionCookie + "\r\n";
-  req += "Connection: close\r\n";
-  req += "Content-Type: application/x-www-form-urlencoded\r\n";
-  req += "Content-Length: " + String(postData.length()) + "\r\n\r\n";
-  req += postData;
+    for (int i = 0; i < maxLines; ++i) {
+        int dialogIndex = topVisibleIndex + i;
+        if (dialogIndex >= dialogs.size()) break;
 
-  client.print(req);
+        if (dialogIndex == selectedDialogIndex) {
+            M5Cardputer.Display.setTextColor(TFT_BLACK, TFT_WHITE);
+            M5Cardputer.Display.printf("> ");
+        } else {
+            M5Cardputer.Display.setTextColor(TFT_WHITE, TFT_BLACK);
+            M5Cardputer.Display.printf("  ");
+        }
 
-  while (client.connected() || client.available()) {
-    String line = client.readStringUntil('\n');
-    Serial.println(line);
-  }
-  client.stop();
+        String title = dialogs[dialogIndex].title;
+        if (dialogs[dialogIndex].unread_count > 0) {
+            title += " (+)";
+        }
+        M5Cardputer.Display.setCursor(12, y);
+        M5Cardputer.Display.println(title.substring(0, 35));
+
+        M5Cardputer.Display.setCursor(12, y + 9);
+        M5Cardputer.Display.setTextColor(TFT_SILVER, TFT_BLACK);
+        String lastMsg = dialogs[dialogIndex].last_message;
+        lastMsg.replace("\n", " ");
+        M5Cardputer.Display.println(lastMsg.substring(0, 38));
+
+        y += 20;
+    }
+    M5Cardputer.Display.setTextColor(TFT_WHITE, TFT_BLACK);
 }
 
+void drawChatView() {
+    M5Cardputer.Display.fillScreen(TFT_BLACK);
+    M5Cardputer.Display.setTextSize(1);
+
+    if (selectedDialogIndex < dialogs.size()) {
+        M5Cardputer.Display.fillRect(0, 0, 240, 12, TFT_DARKGREY);
+        M5Cardputer.Display.setTextColor(TFT_WHITE);
+        M5Cardputer.Display.setCursor(5, 2);
+        M5Cardputer.Display.println(dialogs[selectedDialogIndex].title);
+
+        M5Cardputer.Display.setCursor(10, 30);
+        M5Cardputer.Display.println("Message history will be here.");
+        M5Cardputer.Display.setCursor(10, 50);
+        M5Cardputer.Display.println("Press DEL to go back.");
+    }
+}
+
+// --- Main Application ---
 void setup() {
-  M5Cardputer.begin();
-  M5Cardputer.Display.setRotation(1);
-  M5Cardputer.Display.fillScreen(TFT_BLACK);
-  M5Cardputer.Display.setTextSize(1);
-  M5Cardputer.Display.setTextColor(TFT_WHITE);
-  M5Cardputer.Display.setCursor(10, 10);
-
-  if (!SD.begin(12)) {
-    M5Cardputer.Display.println("Please insert an SD card!");
-    while (1) {}
-  }
-
-  M5Cardputer.Display.println("Hold r to reset!");
-  sleep(1.5);
-  M5Cardputer.Display.fillScreen(TFT_BLACK);
-  bool loaded = loadData();
-  if (!loaded || isRPressed()) {
+    M5Cardputer.begin();
+    M5Cardputer.Display.setRotation(1);
+    M5Cardputer.Display.fillScreen(TFT_BLACK);
+    M5Cardputer.Display.setTextSize(1);
+    M5Cardputer.Display.setTextColor(TFT_WHITE);
     M5Cardputer.Display.setCursor(10, 10);
-    M5Cardputer.Display.println("Starting first config");
-    sleep(1.5);
-    firstLaunch();
-    saveData();
-  } else {
-    M5Cardputer.Display.println("Loaded configuration from SD card.");
+
+    if (!SD.begin(12)) {
+        M5Cardputer.Display.println("SD Card Error!");
+        currentState = STATE_ERROR;
+        return;
+    }
+
+    if (!loadData()) {
+        currentState = STATE_ERROR;
+        return;
+    }
+
     connectWiFi();
-  }
+    if (currentState != STATE_ERROR) {
+        fetchDialogs();
+    }
 }
 
 void loop() {
+    M5Cardputer.update();
 
+    if (M5Cardputer.Keyboard.isChange() && M5Cardputer.Keyboard.isPressed()) {
+        Keyboard_Class::KeysState status = M5Cardputer.Keyboard.keysState();
+
+        switch (currentState) {
+            case STATE_CHAT_LIST: {
+                bool needsRedraw = false;
+
+                // Handle character-based keys (like arrows) by iterating status.word
+                for (auto k : status.word) {
+                    if (k == '/') { // Down Arrow
+                        if (selectedDialogIndex < dialogs.size() - 1) {
+                            selectedDialogIndex++;
+                            needsRedraw = true;
+                        }
+                    } else if (k == '.') { // Up Arrow
+                        if (selectedDialogIndex > 0) {
+                            selectedDialogIndex--;
+                            needsRedraw = true;
+                        }
+                    }
+                }
+
+                // Handle special keys (like Enter) by checking boolean flags
+                if (status.enter) {
+                    currentState = STATE_CHAT_VIEW;
+                    drawChatView();
+                    return; // Exit to avoid redrawing list
+                }
+                
+                // Update scrolling if needed
+                if (needsRedraw) {
+                    int maxLines = M5Cardputer.Display.height() / 20;
+                    if (selectedDialogIndex < topVisibleIndex) {
+                        topVisibleIndex = selectedDialogIndex;
+                    }
+                    if (selectedDialogIndex >= topVisibleIndex + maxLines) {
+                        topVisibleIndex = selectedDialogIndex - maxLines + 1;
+                    }
+                    drawChatList();
+                }
+                break;
+            }
+
+            case STATE_CHAT_VIEW: {
+                if (status.del) { // del is the backspace key
+                    currentState = STATE_CHAT_LIST;
+                    drawChatList();
+                }
+                break;
+            }
+
+            case STATE_LOADING:
+            case STATE_ERROR:
+                // Do nothing
+                break;
+        }
+    }
+
+    delay(50);
 }
