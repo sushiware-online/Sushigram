@@ -3,10 +3,6 @@ import json
 import os
 
 class ApiClient:
-    """
-    A Python client for the MP-API (PHP-based Telegram API).
-    This class handles making requests to the API endpoints.
-    """
 
     def __init__(self, instance_url):
         if not instance_url.endswith('/'):
@@ -68,21 +64,19 @@ def setup_and_login():
     """
     print("--- M5Cardputer Full Config and Login Assistant ---")
     print("This script will configure WiFi and log you into Telegram to generate a complete session file.\n")
-
-    # --- Step 1: Collect Basic Configuration ---
+    
     try:
         ssid = input("Enter your WiFi SSID: ")
         password = input("Enter your WiFi Password: ")
-        server_url = input("Enter the FULL instance URL of your server (e.g., https://your.domain/mp-api/): ")
+        server_url = input("Enter the FULL instance URL of your server (e.g., http://mp.nnchan.ru/): ")
         if not server_url.startswith(('http://', 'https://')):
-            server_url = 'https://' + server_url
+            server_url = 'http://' + server_url
     except KeyboardInterrupt:
         print("\n\nOperation cancelled. Exiting.")
         return
 
     server_ip = server_url.split('//')[1].split('/')[0]
 
-    # --- Step 2: Interactive Telegram Login ---
     client = ApiClient(server_url)
     final_response = None
 
@@ -129,13 +123,8 @@ def setup_and_login():
     except KeyboardInterrupt:
         print("\n\nOperation cancelled. Exiting.")
         return
-    
-    # --- Step 3: Check for Success and Generate the JSON file ---
-    #
-    # *** THIS IS THE CORRECTED LOGIC BLOCK ***
-    #
+        
     if final_response and final_response.get('res') == 1:
-        # Success! The token to save is the one already stored in the client object.
         final_user_token = client.user_token
         print("\n✅ Login successful! Final user token has been captured.")
 
